@@ -15,9 +15,11 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+from banner_utils import send_banner
 from config import ADMIN_IDS
 from db import *
 from localization import *
+from tg_utils import safe_edit_text
 
 logger = logging.getLogger("notch_bot")
 
@@ -78,7 +80,7 @@ async def handle_admin_queue_page(
         await handle_admin_queue_page(query, state, lang, page - 1, page_size)
         return
     if not rows:
-        await query.message.edit_text(t(lang, "admin_queue_empty"), reply_markup=admin_menu_inline(lang))
+        await safe_edit_text(query.message,t(lang, "admin_queue_empty"), reply_markup=admin_menu_inline(lang))
         await query.answer()
         return
     has_next = len(rows) > page_size
@@ -103,7 +105,7 @@ async def handle_admin_queue_page(
     if has_next:
         nav.append(InlineKeyboardButton(text=t(lang, "brand_next"), callback_data=f"admin:queue_page:{page + 1}"))
     menu = InlineKeyboardMarkup(inline_keyboard=[*row_buttons, nav, *kb[1:]])
-    await query.message.edit_text("\n".join(lines), reply_markup=menu)
+    await safe_edit_text(query.message,"\n".join(lines), reply_markup=menu)
     await query.answer()
 
 async def handle_admin_view_start(query: CallbackQuery, state: FSMContext, lang: str) -> None:
@@ -151,7 +153,7 @@ async def handle_admin_submission_view(
             )
         ]
     )
-    await query.message.edit_text(
+    await safe_edit_text(query.message,
         t(
             lang,
             "admin_view_text",
@@ -289,7 +291,18 @@ async def handle_admin_text(message: Message, state: FSMContext, lang: str) -> b
 
     if is_admin(message.from_user.id) and text == t(lang, "menu_admin"):
         await state.clear()
-        await message.answer(t(lang, "menu_admin"), reply_markup=admin_menu_inline(lang))
+        sent = await send_banner(
+            message,
+            "admin_panel",
+            lang=lang,
+            aliases=["main_menu"],
+            logger=logger,
+            caption=t(lang, "menu_admin"),
+            reply_markup=admin_menu_inline(lang),
+        )
+        if not sent:
+            await message.answer(t(lang, "menu_admin"), reply_markup=admin_menu_inline(lang))
         return True
 
     return False
+

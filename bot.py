@@ -8,23 +8,27 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     ErrorEvent,
     FSInputFile,
+    InputMediaPhoto,
+    InputMediaVideo,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
 )
 
 from config import *
+from banner_utils import resolve_banner, send_banner
 from db import *
 from localization import *
 from menus import *
 from admin_panel import *
+from tg_utils import safe_edit_text
 
 STORAGE_ROOT = Path("storage").resolve()
 STORAGE_CONFIGS_DIR = STORAGE_ROOT / "configs"
@@ -78,7 +82,67 @@ async def send_main_menu(message: Message, lang: str) -> None:
             await message.answer(t(lang, "menu_admin"), reply_markup=admin_keyboard(lang))
         except Exception:
             logger.exception("Failed to send admin keyboard for user_id=%s", getattr(message.from_user, "id", None))
-    await message.answer(t(lang, "welcome"), reply_markup=main_menu(lang))
+    sent = await send_banner(
+        message,
+        "main_menu",
+        lang=lang,
+        logger=logger,
+        caption=t(lang, "welcome"),
+        reply_markup=main_menu(lang),
+    )
+    if not sent:
+        await message.answer(t(lang, "welcome"), reply_markup=main_menu(lang))
+
+
+async def _show_section(
+    query: CallbackQuery,
+    lang: str,
+    text: str,
+    reply_markup,
+    stem: str | None = None,
+    aliases: list[str] | None = None,
+    parse_mode: str | None = None,
+) -> None:
+    if stem:
+        hit = resolve_banner(stem, lang=lang, aliases=aliases)
+        if hit:
+            path, kind = hit
+            try:
+                media = (
+                    InputMediaPhoto(media=FSInputFile(path), caption=text, parse_mode=parse_mode)
+                    if kind == "photo"
+                    else InputMediaVideo(media=FSInputFile(path), caption=text, parse_mode=parse_mode)
+                )
+                await query.message.edit_media(media=media, reply_markup=reply_markup)
+                return
+            except TelegramBadRequest as exc:
+                lowered = str(exc).lower()
+                if "message is not modified" in lowered:
+                    return
+                can_fallback = (
+                    "there is no media in the message to edit" in lowered
+                    or "message can't be edited" in lowered
+                    or "bad request: message to edit not found" in lowered
+                )
+                if not can_fallback:
+                    logger.exception("Failed to edit section media '%s': %s", stem, exc)
+                sent = await send_banner(
+                    query.message,
+                    stem,
+                    lang=lang,
+                    aliases=aliases,
+                    logger=logger,
+                    caption=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                )
+                if sent:
+                    try:
+                        await query.message.edit_reply_markup(reply_markup=None)
+                    except Exception:
+                        pass
+                    return
+    await safe_edit_text(query.message, text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 def _format_settings(cfg: dict) -> str:
     mode_id = int(cfg.get("mode_id", 0))
@@ -145,7 +209,7 @@ async def _render_recent_configs(query: CallbackQuery, lang: str, page: int) -> 
         await _render_recent_configs(query, lang, page - 1)
         return
     if not rows:
-        await query.message.edit_text(t(lang, "empty"), reply_markup=configs_menu(lang))
+        await safe_edit_text(query.message,t(lang, "empty"), reply_markup=configs_menu(lang))
         return
     has_next = len(rows) > LIST_PAGE_SIZE
     page_rows = rows[:LIST_PAGE_SIZE]
@@ -155,7 +219,7 @@ async def _render_recent_configs(query: CallbackQuery, lang: str, page: int) -> 
         cfg_ids.append(int(cid))
         author_view = _author_view(lang, str(author), int(anon), int(user_id or 0))
         lines.append(f"#{cid} | {html.escape(str(brand))} {html.escape(str(model))} | {author_view}")
-    await query.message.edit_text(
+    await safe_edit_text(query.message,
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=configs_result_menu(
@@ -182,7 +246,7 @@ async def _render_brand_configs(query: CallbackQuery, lang: str, brand_idx: int,
         await _render_brand_configs(query, lang, brand_idx, page - 1)
         return
     if not rows:
-        await query.message.edit_text(t(lang, "brand_empty"), reply_markup=configs_menu(lang))
+        await safe_edit_text(query.message,t(lang, "brand_empty"), reply_markup=configs_menu(lang))
         return
     has_next = len(rows) > LIST_PAGE_SIZE
     page_rows = rows[:LIST_PAGE_SIZE]
@@ -192,7 +256,7 @@ async def _render_brand_configs(query: CallbackQuery, lang: str, brand_idx: int,
         cfg_ids.append(int(cid))
         author_view = _author_view(lang, str(author), int(anon), int(user_id or 0))
         lines.append(f"#{cid} | {html.escape(str(model))} | {author_view}")
-    await query.message.edit_text(
+    await safe_edit_text(query.message,
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=configs_result_menu(
@@ -210,7 +274,7 @@ async def _render_device_configs(query: CallbackQuery, lang: str, user_id: int, 
     page = max(0, int(page))
     devices = await list_user_devices(user_id)
     if not devices:
-        await query.message.edit_text(t(lang, "my_devices_empty"), reply_markup=devices_menu(lang))
+        await safe_edit_text(query.message,t(lang, "my_devices_empty"), reply_markup=devices_menu(lang))
         return
     offset = page * LIST_PAGE_SIZE
     rows = await list_configs_for_models_page(devices, LIST_PAGE_SIZE + 1, offset)
@@ -218,7 +282,7 @@ async def _render_device_configs(query: CallbackQuery, lang: str, user_id: int, 
         await _render_device_configs(query, lang, user_id, page - 1)
         return
     if not rows:
-        await query.message.edit_text(t(lang, "devices_search_empty"), reply_markup=devices_menu(lang))
+        await safe_edit_text(query.message,t(lang, "devices_search_empty"), reply_markup=devices_menu(lang))
         return
     has_next = len(rows) > LIST_PAGE_SIZE
     page_rows = rows[:LIST_PAGE_SIZE]
@@ -228,7 +292,7 @@ async def _render_device_configs(query: CallbackQuery, lang: str, user_id: int, 
         cfg_ids.append(int(cid))
         author_view = _author_view(lang, str(author), int(anon), int(user_id or 0))
         lines.append(f"#{cid} | {html.escape(str(brand))} {html.escape(str(model))} | {author_view}")
-    await query.message.edit_text(
+    await safe_edit_text(query.message,
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=configs_result_menu(
@@ -275,11 +339,6 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     lang = await resolve_lang(message.from_user.id, message.from_user.language_code)
     await send_main_menu(message, lang)
 
-@dp.message(Command("help"))
-async def cmd_help(message: Message) -> None:
-    lang = await resolve_lang(message.from_user.id, message.from_user.language_code)
-    await message.answer(t(lang, "help"), reply_markup=main_menu(lang))
-
 @dp.message(Command("lang"))
 async def cmd_lang(message: Message) -> None:
     lang = await resolve_lang(message.from_user.id, message.from_user.language_code)
@@ -289,35 +348,54 @@ async def cmd_lang(message: Message) -> None:
 async def cb_lang(query: CallbackQuery) -> None:
     new_lang = LANG_RU if query.data == "lang:ru" else LANG_EN
     await set_lang(query.from_user.id, new_lang)
-    await query.message.edit_text(t(new_lang, "lang_set"))
+    await safe_edit_text(query.message,t(new_lang, "lang_set"))
     await query.answer()
 
 @dp.callback_query(F.data == "menu:main")
 async def cb_main_menu(query: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     lang = await resolve_lang(query.from_user.id, query.from_user.language_code)
-    await query.message.edit_text(t(lang, "welcome"), reply_markup=main_menu(lang))
+    await _show_section(
+        query,
+        lang,
+        t(lang, "welcome"),
+        main_menu(lang),
+        stem="main_menu",
+    )
     await query.answer()
 
 @dp.callback_query(F.data == "menu:configs")
 async def cb_menu_configs(query: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     lang = await resolve_lang(query.from_user.id, query.from_user.language_code)
-    await query.message.edit_text(t(lang, "configs_title"), reply_markup=configs_menu(lang))
+    await _show_section(
+        query,
+        lang,
+        t(lang, "configs_title"),
+        configs_menu(lang),
+        stem="configs",
+    )
     await query.answer()
 
 @dp.callback_query(F.data == "menu:devices")
 async def cb_menu_devices(query: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     lang = await resolve_lang(query.from_user.id, query.from_user.language_code)
-    await query.message.edit_text(t(lang, "devices_title"), reply_markup=devices_menu(lang))
+    await _show_section(
+        query,
+        lang,
+        t(lang, "devices_title"),
+        devices_menu(lang),
+        stem="my _devices",
+        aliases=["my_devices", "devices"],
+    )
     await query.answer()
 
 @dp.callback_query(F.data == "menu:suggest")
 async def cb_menu_suggest(query: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(Flow.waiting_config)
     lang = await resolve_lang(query.from_user.id, query.from_user.language_code)
-    await query.message.edit_text(
+    await safe_edit_text(query.message,
         t(lang, "suggest_send_config"),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
@@ -348,10 +426,10 @@ async def cb_cfg_brand(query: CallbackQuery) -> None:
     lang = await resolve_lang(query.from_user.id, query.from_user.language_code)
     brands = await list_brands()
     if not brands:
-        await query.message.edit_text(t(lang, "brand_empty"), reply_markup=configs_menu(lang))
+        await safe_edit_text(query.message,t(lang, "brand_empty"), reply_markup=configs_menu(lang))
         await query.answer()
         return
-    await query.message.edit_text(t(lang, "brands_hint"), reply_markup=brands_menu(lang, brands, 0))
+    await safe_edit_text(query.message,t(lang, "brands_hint"), reply_markup=brands_menu(lang, brands, 0))
     await query.answer()
 
 @dp.callback_query(F.data.startswith("cfg:brand_page:"))
@@ -359,7 +437,7 @@ async def cb_cfg_brand_page(query: CallbackQuery) -> None:
     lang = await resolve_lang(query.from_user.id, query.from_user.language_code)
     brands = await list_brands()
     if not brands:
-        await query.message.edit_text(t(lang, "brand_empty"), reply_markup=configs_menu(lang))
+        await safe_edit_text(query.message,t(lang, "brand_empty"), reply_markup=configs_menu(lang))
         await query.answer()
         return
     raw_page = query.data.split(":")[-1]
@@ -367,7 +445,7 @@ async def cb_cfg_brand_page(query: CallbackQuery) -> None:
         await query.answer()
         return
     page = int(raw_page)
-    await query.message.edit_text(t(lang, "brands_hint"), reply_markup=brands_menu(lang, brands, page))
+    await safe_edit_text(query.message,t(lang, "brands_hint"), reply_markup=brands_menu(lang, brands, page))
     await query.answer()
 
 @dp.callback_query(F.data.startswith("cfg:brand_pick:"))
@@ -426,7 +504,7 @@ async def cb_noop(query: CallbackQuery) -> None:
 async def cb_dev_add(query: CallbackQuery, state: FSMContext) -> None:
     lang = await resolve_lang(query.from_user.id, query.from_user.language_code)
     await state.set_state(Flow.waiting_device_add)
-    await query.message.edit_text(t(lang, "ask_device"), parse_mode="HTML")
+    await safe_edit_text(query.message,t(lang, "ask_device"), parse_mode="HTML")
     await query.answer()
 
 @dp.callback_query(F.data == "dev:list")
@@ -434,10 +512,10 @@ async def cb_dev_list(query: CallbackQuery) -> None:
     lang = await resolve_lang(query.from_user.id, query.from_user.language_code)
     devices = await list_user_devices(query.from_user.id)
     if not devices:
-        await query.message.edit_text(t(lang, "my_devices_empty"), reply_markup=devices_menu(lang))
+        await safe_edit_text(query.message,t(lang, "my_devices_empty"), reply_markup=devices_menu(lang))
         await query.answer()
         return
-    await query.message.edit_text(
+    await safe_edit_text(query.message,
         "\n".join([t(lang, "my_devices_header")] + [f"- {d}" for d in devices]),
         reply_markup=devices_menu(lang),
     )
@@ -471,18 +549,18 @@ async def cb_visibility(query: CallbackQuery, state: FSMContext) -> None:
     sub_id = int(data.get("sub_id", 0) or 0)
     if query.data == "vis:cancel":
         await state.clear()
-        await query.message.edit_text(t(lang, "welcome"), reply_markup=main_menu(lang))
+        await safe_edit_text(query.message,t(lang, "welcome"), reply_markup=main_menu(lang))
         await query.answer()
         return
     if sub_id == 0:
         await state.clear()
-        await query.message.edit_text(t(lang, "save_failed"), reply_markup=main_menu(lang))
+        await safe_edit_text(query.message,t(lang, "save_failed"), reply_markup=main_menu(lang))
         await query.answer()
         return
     is_anon = query.data == "vis:hide"
     await set_submission_anonymity(sub_id, is_anon)
     await state.set_state(Flow.waiting_before)
-    await query.message.edit_text(t(lang, "send_before"))
+    await safe_edit_text(query.message,t(lang, "send_before"))
     await query.answer()
 
 @dp.callback_query(F.data == "admin:queue")
@@ -570,23 +648,6 @@ async def cb_admin_approve(query: CallbackQuery, state: FSMContext) -> None:
 async def cb_admin_reject(query: CallbackQuery, state: FSMContext) -> None:
     lang = await resolve_lang(query.from_user.id, query.from_user.language_code)
     await handle_admin_reject_start(query, state, lang)
-
-@dp.message(Command("config"))
-async def cmd_config(message: Message, command: CommandObject) -> None:
-    lang = await resolve_lang(message.from_user.id, message.from_user.language_code)
-    if not command.args or not command.args.strip().isdigit():
-        await message.answer(t(lang, "usage_config"))
-        return
-    cfg_id = int(command.args.strip())
-    row = await get_config_for_send(cfg_id)
-    if not row:
-        await message.answer(t(lang, "not_found"))
-        return
-    name, path = str(row[0]), Path(str(row[1]))
-    if not path.exists():
-        await message.answer(t(lang, "not_found"))
-        return
-    await message.answer_document(FSInputFile(path), caption=f"#{cfg_id} {name}")
 
 @dp.message(F.text)
 async def handle_text_menu(message: Message, state: FSMContext) -> None:
@@ -751,3 +812,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
