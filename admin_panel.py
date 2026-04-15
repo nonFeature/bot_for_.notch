@@ -219,6 +219,10 @@ async def handle_admin_approve_action(
 ) -> None:
     if not await ensure_admin_callback(query, state, lang):
         return
+    sub = await get_submission(sub_id)
+    if not sub:
+        await query.answer(t(lang, "admin_not_found"), show_alert=True)
+        return
     try:
         cfg_id, owner_id, model = await approve_submission(
             sub_id,
